@@ -2,14 +2,15 @@ package redisstream
 
 import (
 	"context"
+	"net"
 	"sync"
 	"time"
 
 	"github.com/Rican7/retry"
 	"github.com/ThreeDotsLabs/watermill"
 	"github.com/ThreeDotsLabs/watermill/message"
+	"github.com/go-redis/redis/v8"
 	"github.com/pkg/errors"
-	"github.com/redis/go-redis/v9"
 )
 
 const (
@@ -143,7 +144,10 @@ func (sc *SubscriberConfig) Validate() error {
 }
 
 func (s *Subscriber) Subscribe(ctx context.Context, topic string) (<-chan *message.Message, error) {
-	if s.closed {
+	s.closeMutex.Lock()
+	closed := s.closed
+	s.closeMutex.Unlock()
+	if closed {
 		return nil, errors.New("subscriber closed")
 	}
 
@@ -450,7 +454,11 @@ func (s *Subscriber) Close() error {
 	close(s.closing)
 	s.subscribersWg.Wait()
 
-	if err := s.client.Close(); err != nil {
+	// the errors.Is(err, net.ErrClosed) bit is because there is a race condition that's hard to
+	// fix here when closing a subscriber: it makes read return, which in turn cancels the claim context,
+	// which also tries to connection (see
+	// https://github.com/redis/go-redis/blob/v8.11.5/redis.go#L295)
+	if err := s.client.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
 		return err
 	}
 

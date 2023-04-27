@@ -5,8 +5,8 @@ go 1.19
 require (
 	github.com/Rican7/retry v0.3.1
 	github.com/ThreeDotsLabs/watermill v1.2.0
+	github.com/go-redis/redis/v8 v8.11.5
 	github.com/pkg/errors v0.9.1
-	github.com/redis/go-redis/v9 v9.0.2
 	github.com/stretchr/testify v1.8.1
 	github.com/vmihailenco/msgpack v4.0.4+incompatible
 )
