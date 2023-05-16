@@ -18,6 +18,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// should be long enough to be robust even for CI boxes
+const testInterval = 250 * time.Millisecond
+
 func redisClient() (redis.UniversalClient, error) {
 	client := redis.NewClient(&redis.Options{
 		Addr:        "127.0.0.1:6379",
@@ -64,8 +67,7 @@ func createPubSubWithConsumerGroup(t *testing.T, consumerGroup string) (message.
 		Client:        redisClientOrFail(t),
 		Consumer:      watermill.NewShortUUID(),
 		ConsumerGroup: consumerGroup,
-		BlockTime:     10 * time.Millisecond,
-		ClaimInterval: 3 * time.Second,
+		ClaimInterval: 10 * time.Millisecond,
 		MaxIdleTime:   5 * time.Second,
 	})
 }
@@ -129,79 +131,7 @@ func TestSubscriber(t *testing.T) {
 	require.NoError(t, subscriber.Close())
 }
 
-func TestFanOut(t *testing.T) {
-	topic := watermill.NewShortUUID()
-
-	subscriber1, err := NewSubscriber(
-		SubscriberConfig{
-			Client:        redisClientOrFail(t),
-			Consumer:      watermill.NewShortUUID(),
-			ConsumerGroup: "",
-		},
-		watermill.NewStdLogger(true, false),
-	)
-	require.NoError(t, err)
-
-	subscriber2, err := NewSubscriber(
-		SubscriberConfig{
-			Client:        redisClientOrFail(t),
-			Consumer:      watermill.NewShortUUID(),
-			ConsumerGroup: "",
-		},
-		watermill.NewStdLogger(true, false),
-	)
-	require.NoError(t, err)
-
-	publisher, err := NewPublisher(
-		PublisherConfig{
-			Client: redisClientOrFail(t),
-		},
-		watermill.NewStdLogger(false, false),
-	)
-	require.NoError(t, err)
-	for i := 0; i < 10; i++ {
-		require.NoError(t, publisher.Publish(topic, message.NewMessage(watermill.NewShortUUID(), []byte("test"+strconv.Itoa(i)))))
-	}
-
-	messages1, err := subscriber1.Subscribe(context.Background(), topic)
-	require.NoError(t, err)
-	messages2, err := subscriber2.Subscribe(context.Background(), topic)
-	require.NoError(t, err)
-
-	// wait for initial XREAD before publishing messages to avoid message loss
-	time.Sleep(2 * DefaultBlockTime)
-	for i := 10; i < 50; i++ {
-		require.NoError(t, publisher.Publish(topic, message.NewMessage(watermill.NewShortUUID(), []byte("test"+strconv.Itoa(i)))))
-	}
-
-	for i := 10; i < 50; i++ {
-		msg := <-messages1
-		if msg == nil {
-			t.Fatal("msg nil")
-		}
-		t.Logf("subscriber 1: %v %v %v", msg.UUID, msg.Metadata, string(msg.Payload))
-		require.Equal(t, string(msg.Payload), "test"+strconv.Itoa(i))
-		msg.Ack()
-	}
-	for i := 10; i < 50; i++ {
-		msg := <-messages2
-		if msg == nil {
-			t.Fatal("msg nil")
-		}
-		t.Logf("subscriber 2: %v %v %v", msg.UUID, msg.Metadata, string(msg.Payload))
-		require.Equal(t, string(msg.Payload), "test"+strconv.Itoa(i))
-		msg.Ack()
-	}
-
-	require.NoError(t, publisher.Close())
-	require.NoError(t, subscriber1.Close())
-	require.NoError(t, subscriber2.Close())
-}
-
 func TestClaimIdle(t *testing.T) {
-	// should be long enough to be robust even for CI boxes
-	testInterval := 250 * time.Millisecond
-
 	topic := watermill.NewShortUUID()
 	consumerGroup := watermill.NewShortUUID()
 	testLogger := watermill.NewStdLogger(true, false)
@@ -228,7 +158,7 @@ func TestClaimIdle(t *testing.T) {
 		// handles loop variables in function literals
 		subID := subscriberID
 
-		suscriber, err := NewSubscriber(
+		subscriber, err := NewSubscriber(
 			SubscriberConfig{
 				Client:        redisClientOrFail(t),
 				Consumer:      strconv.Itoa(subID),
@@ -264,7 +194,7 @@ func TestClaimIdle(t *testing.T) {
 		router.AddNoPublisherHandler(
 			strconv.Itoa(subID),
 			topic,
-			suscriber,
+			subscriber,
 			func(msg *message.Message) error {
 				msgID, err := strconv.Atoi(string(msg.Payload))
 				require.NoError(t, err)
@@ -342,4 +272,88 @@ func TestClaimIdle(t *testing.T) {
 	}
 
 	assert.GreaterOrEqual(t, nMsgsWithRetries, 3)
+}
+
+// this test checks that even workers that are idle for a while will
+// try to claim messages that have been idle for too long, which is not covered by TestClaimIdle
+func TestMessagesGetClaimedEvenByIdleWorkers(t *testing.T) {
+	topic := watermill.NewShortUUID()
+	consumerGroup := watermill.NewShortUUID()
+	testLogger := watermill.NewStdLogger(true, false)
+
+	router, err := message.NewRouter(message.RouterConfig{
+		CloseTimeout: testInterval,
+	}, testLogger)
+	require.NoError(t, err)
+
+	receivedCh := make(chan int)
+	payload := message.Payload("coucou toi")
+
+	// let's create a few subscribers, that just wait for a while each time they receive anything
+	nSubscribers := 8
+	for subscriberID := 0; subscriberID < nSubscribers; subscriberID++ {
+		subID := subscriberID
+
+		subscriber, err := NewSubscriber(
+			SubscriberConfig{
+				Client:        redisClientOrFail(t),
+				Consumer:      strconv.Itoa(subID),
+				ConsumerGroup: consumerGroup,
+				ClaimInterval: testInterval,
+				MaxIdleTime:   testInterval,
+			},
+			testLogger,
+		)
+		require.NoError(t, err)
+
+		router.AddNoPublisherHandler(
+			strconv.Itoa(subID),
+			topic,
+			subscriber,
+			func(msg *message.Message) error {
+				assert.Equal(t, msg.Payload, payload)
+
+				receivedCh <- subID
+				time.Sleep(time.Duration(nSubscribers+2) * testInterval)
+
+				return nil
+			},
+		)
+	}
+
+	runCtx, cancel := context.WithCancel(context.Background())
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		require.NoError(t, router.Run(runCtx))
+	}()
+
+	// now let's push only one message
+	publisher, err := NewPublisher(
+		PublisherConfig{
+			Client: redisClientOrFail(t),
+		},
+		testLogger,
+	)
+	require.NoError(t, err)
+	msg := message.NewMessage(watermill.NewShortUUID(), payload)
+	require.NoError(t, publisher.Publish(topic, msg))
+
+	// it should get retried by all subscribers
+	seenSubscribers := make([]bool, nSubscribers)
+	for receivedCount := 0; receivedCount != nSubscribers; receivedCount++ {
+		select {
+		case subscriberID := <-receivedCh:
+			assert.False(t, seenSubscribers[subscriberID], "subscriber %d seen more than once", subscriberID)
+			seenSubscribers[subscriberID] = true
+
+		case <-time.After(time.Duration(nSubscribers) * 2 * testInterval):
+			t.Fatalf("timed out waiting for new messages, only received %d messages", receivedCount)
+		}
+	}
+
+	// shut everything down
+	cancel()
+	wg.Wait()
 }

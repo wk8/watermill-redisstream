@@ -2,21 +2,16 @@ package redisstream
 
 import (
 	"context"
-	"sync"
-
 	"github.com/ThreeDotsLabs/watermill"
 	"github.com/ThreeDotsLabs/watermill/message"
-	"github.com/pkg/errors"
 	"github.com/go-redis/redis/v8"
+	"github.com/pkg/errors"
 )
 
 type Publisher struct {
 	config PublisherConfig
 	client redis.UniversalClient
 	logger watermill.LoggerAdapter
-
-	closed     bool
-	closeMutex sync.Mutex
 }
 
 // NewPublisher creates a new redis stream Publisher.
@@ -35,7 +30,6 @@ func NewPublisher(config PublisherConfig, logger watermill.LoggerAdapter) (*Publ
 		config: config,
 		client: config.Client,
 		logger: logger,
-		closed: false,
 	}, nil
 }
 
@@ -69,10 +63,6 @@ func (c *PublisherConfig) Validate() error {
 // Publish is blocking and wait for redis response
 // When one of messages delivery fails - function is interrupted.
 func (p *Publisher) Publish(topic string, msgs ...*message.Message) error {
-	if p.closed {
-		return errors.New("publisher closed")
-	}
-
 	logFields := make(watermill.LogFields, 3)
 	logFields["topic"] = topic
 
@@ -108,17 +98,5 @@ func (p *Publisher) Publish(topic string, msgs ...*message.Message) error {
 }
 
 func (p *Publisher) Close() error {
-	p.closeMutex.Lock()
-	defer p.closeMutex.Unlock()
-
-	if p.closed {
-		return nil
-	}
-	p.closed = true
-
-	if err := p.client.Close(); err != nil {
-		return err
-	}
-
 	return nil
 }
