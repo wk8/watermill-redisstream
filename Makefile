@@ -11,7 +11,7 @@ test_short:
 	go test ./... -short
 
 test_race:
-	go test ./... -short -race
+	go test ./... -race
 
 test_stress:
 	go test -v -tags=stress -timeout=45m ./...
