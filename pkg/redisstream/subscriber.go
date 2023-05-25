@@ -14,8 +14,6 @@ import (
 )
 
 const (
-	DefaultBlockTime = 100 * time.Millisecond
-
 	// DefaultClaimInterval is how often to check for dead workers to claim pending messages from
 	DefaultClaimInterval = 5 * time.Second
 
