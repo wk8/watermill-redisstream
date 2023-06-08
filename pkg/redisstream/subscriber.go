@@ -43,6 +43,9 @@ type SubscriberConfig struct {
 	// How long after Nack message should be redelivered
 	NackResendSleep time.Duration
 
+	// How many times nacked messages will be retried before being discarded
+	NackMaxRetries int
+
 	// Claim idle pending message maximum interval
 	ClaimInterval time.Duration
 
@@ -368,7 +371,7 @@ func (s *topicSubscriber) processMessage(ctx context.Context, redisMessage *redi
 	msg.SetContext(msgCtx)
 	defer cancel()
 
-	for {
+	for retriedCount := 0; ; retriedCount++ {
 		select {
 		case output <- msg:
 			logger.Trace("message sent to consumer", nil)
@@ -404,7 +407,14 @@ func (s *topicSubscriber) processMessage(ctx context.Context, redisMessage *redi
 			)
 
 		case <-msg.Nacked():
-			logger.Trace("message nacked", nil)
+			logger.Trace("message nacked", watermill.LogFields{"retries": retriedCount})
+
+			if s.config.NackMaxRetries > 0 && retriedCount >= s.config.NackMaxRetries {
+				logger.Error("Failed message, too many nacks", errors.New("too many retries"), watermill.LogFields{"retries": retriedCount})
+
+				// we don't want to exit the subscriber for that
+				return nil
+			}
 
 			if s.config.NackResendSleep > 0 {
 				select {
